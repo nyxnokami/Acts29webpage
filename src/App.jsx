@@ -1,4 +1,9 @@
 import { useState, useEffect, useRef } from "react";
+import { db } from "./firebase";
+import {
+  collection, addDoc, getDocs, deleteDoc,
+  doc, orderBy, query, serverTimestamp
+} from "firebase/firestore";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 🎵  Drop your audio file in /public/ and update this path:
@@ -52,11 +57,7 @@ const PARTICLES = Array.from({ length:32 }, (_, i) => ({
 const AC = ["#7B5E2A","#5E2A7B","#2A5E7B","#7B2A5E","#2A7B5E"];
 const initials = n => n.split(" ").map(w => w[0]).join("").toUpperCase().slice(0,2);
 
-// ── STORAGE (localStorage — works in any browser) ────────────────────────────
-const store = {
-  get: (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } },
-  set: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} },
-};
+
 
 // ── INJECT GLOBAL STYLES INTO <head> ─────────────────────────────────────────
 // Fonts use a <link> element (more reliable than @import inside textContent).
@@ -637,24 +638,33 @@ const Timeline = () => (
 
 // ── GUESTBOOK ─────────────────────────────────────────────────────────────────
 const Guestbook = () => {
-  const [msgs, setMsgs] = useState([]);
-  const [name, setName] = useState("");
-  const [msg, setMsg]   = useState("");
-  const [ok, setOk]     = useState(false);
+  const [msgs, setMsgs]   = useState([]);
+  const [name, setName]   = useState("");
+  const [msg, setMsg]     = useState("");
+  const [ok, setOk]       = useState(false);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const saved = store.get("acts29_guestbook");
-    if (saved) setMsgs(saved);
+    (async () => {
+      const q = query(collection(db, "guestbook"), orderBy("timestamp", "desc"));
+      const snap = await getDocs(q);
+      setMsgs(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    })();
   }, []);
 
-  const submit = () => {
+  const submit = async () => {
     if (!name.trim() || !msg.trim()) return;
-    const entry = { id:Date.now(), name:name.trim(), message:msg.trim(),
-      date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}) };
-    const next = [entry, ...msgs];
-    store.set("acts29_guestbook", next);
-    setMsgs(next); setName(""); setMsg(""); setOk(true);
+    setLoading(true);
+    const entry = {
+      name: name.trim(), message: msg.trim(),
+      date: new Date().toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" }),
+      timestamp: serverTimestamp(),
+    };
+    const docRef = await addDoc(collection(db, "guestbook"), entry);
+    setMsgs(prev => [{ id: docRef.id, ...entry }, ...prev]);
+    setName(""); setMsg(""); setOk(true);
     setTimeout(() => setOk(false), 3000);
+    setLoading(false);
   };
 
   return (
@@ -663,13 +673,13 @@ const Guestbook = () => {
       <div style={{ maxWidth:540, margin:"0 auto 3rem" }}>
         <Inp value={name} onChange={e=>setName(e.target.value)} placeholder="Your name" style={{ marginBottom:".75rem" }} />
         <TA value={msg} onChange={e=>setMsg(e.target.value)} rows={4} placeholder="A message, a prayer, a memory..." style={{ marginBottom:"1rem" }} />
-        <button onClick={submit} disabled={!name||!msg}
+        <button onClick={submit} disabled={loading||!name||!msg}
           style={{ width:"100%", padding:".9rem", border:"1px solid #C9A450",
             background:ok?"rgba(201,164,80,0.15)":"rgba(201,164,80,0.07)",
             color:ok?"#E8C97A":"#C9A450", fontFamily:"Cinzel,serif", fontSize:".73rem",
             letterSpacing:".22em", textTransform:"uppercase", cursor:"pointer", transition:"all .3s ease",
-            opacity:(!name||!msg)?.5:1 }}>
-          {ok?"✓ Message Added":"Leave Your Mark"}
+            opacity:(loading||!name||!msg)?.5:1 }}>
+          {ok?"✓ Message Added":loading?"Sending...":"Leave Your Mark"}
         </button>
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))", gap:"1rem" }}>
@@ -688,7 +698,6 @@ const Guestbook = () => {
     </section>
   );
 };
-
 // ── SUBMIT MODAL ──────────────────────────────────────────────────────────────
 const SubmitModal = ({ onClose }) => {
   const [f, setF] = useState({ name:"",role:"",department:"",bio:"",scripture:"",scriptureText:"",spiritualGift:"",hobbies:"",testimony:"",since:"",funFact:"",photo:"" });
@@ -716,11 +725,15 @@ const SubmitModal = ({ onClose }) => {
     reader.readAsDataURL(file);
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!f.name||!f.role) return;
-    const entry = { id:Date.now(), ...f, hobbies:f.hobbies.split(",").map(h=>h.trim()).filter(Boolean), approved:false };
-    const prev = store.get("acts29_submissions") || [];
-    store.set("acts29_submissions", [...prev, entry]);
+    const entry = {
+      ...f,
+      hobbies: f.hobbies.split(",").map(h=>h.trim()).filter(Boolean),
+      approved: false,
+      timestamp: serverTimestamp(),
+    };
+    await addDoc(collection(db, "submissions"), entry);
     setDone(true);
   };
 
@@ -795,29 +808,32 @@ const SubmitModal = ({ onClose }) => {
 
 // ── ADMIN PANEL ───────────────────────────────────────────────────────────────
 const AdminPanel = ({ onClose, onApprove }) => {
-  const [pw, setPw]     = useState("");
-  const [auth, setAuth] = useState(false);
-  const [subs, setSubs] = useState([]);
+  const [pw, setPw]       = useState("");
+  const [auth, setAuth]   = useState(false);
+  const [subs, setSubs]   = useState([]);
   const [wrong, setWrong] = useState(false);
 
   useEffect(() => {
     if (!auth) return;
-    const saved = store.get("acts29_submissions");
-    if (saved) setSubs(saved);
+    (async () => {
+      const snap = await getDocs(collection(db, "submissions"));
+      setSubs(snap.docs.map(d => ({ firestoreId: d.id, ...d.data() })));
+    })();
   }, [auth]);
 
   const tryAuth = () => { if (pw==="acts29admin"){setAuth(true);setWrong(false);}else setWrong(true); };
 
-  const approve = sub => {
-    onApprove({...sub, approved:true});
-    const next = subs.filter(s => s.id!==sub.id);
-    store.set("acts29_submissions", next);
-    setSubs(next);
+  const approve = async (sub) => {
+    const { firestoreId, ...data } = sub;
+    await addDoc(collection(db, "members"), { ...data, approved: true });
+    await deleteDoc(doc(db, "submissions", firestoreId));
+    onApprove({ ...data, approved: true, id: firestoreId });
+    setSubs(prev => prev.filter(s => s.firestoreId !== firestoreId));
   };
-  const reject = sub => {
-    const next = subs.filter(s => s.id!==sub.id);
-    store.set("acts29_submissions", next);
-    setSubs(next);
+
+  const reject = async (sub) => {
+    await deleteDoc(doc(db, "submissions", sub.firestoreId));
+    setSubs(prev => prev.filter(s => s.firestoreId !== sub.firestoreId));
   };
 
   return (
@@ -841,7 +857,7 @@ const AdminPanel = ({ onClose, onApprove }) => {
             {subs.length===0
               ? <p style={{ fontFamily:"Cormorant Garamond,serif", fontStyle:"italic", color:"rgba(250,245,233,0.45)", textAlign:"center", padding:"2rem" }}>All clear — no pending submissions.</p>
               : subs.map(sub => (
-                <div key={sub.id} style={{ background:"rgba(255,248,230,0.04)", border:"1px solid rgba(201,164,80,0.2)", padding:"1.25rem", marginBottom:"1rem" }}>
+                <div key={sub.firestoreId} style={{ background:"rgba(255,248,230,0.04)", border:"1px solid rgba(201,164,80,0.2)", padding:"1.25rem", marginBottom:"1rem" }}>
                   <div style={{ display:"flex", alignItems:"center", gap:".75rem", marginBottom:".75rem" }}>
                     <Avatar name={sub.name} size={44} photo={sub.photo} />
                     <div>
@@ -852,7 +868,7 @@ const AdminPanel = ({ onClose, onApprove }) => {
                   <p style={{ fontFamily:"Inter,sans-serif", fontSize:".83rem", color:"rgba(250,245,233,0.45)", lineHeight:1.65, marginBottom:"1rem" }}>{sub.bio}</p>
                   <div style={{ display:"flex", gap:".75rem" }}>
                     <button onClick={()=>approve(sub)} style={{ padding:".5rem 1.25rem", border:"1px solid #C9A450", background:"rgba(201,164,80,0.1)", color:"#C9A450", fontFamily:"Inter,sans-serif", fontSize:".78rem", cursor:"pointer" }}>✓ Approve</button>
-                    <button onClick={()=>reject(sub)}  style={{ padding:".5rem 1.25rem", border:"1px solid rgba(200,74,74,0.4)", background:"transparent", color:"rgba(200,74,74,0.7)", fontFamily:"Inter,sans-serif", fontSize:".78rem", cursor:"pointer" }}>✕ Reject</button>
+                    <button onClick={()=>reject(sub)} style={{ padding:".5rem 1.25rem", border:"1px solid rgba(200,74,74,0.4)", background:"transparent", color:"rgba(200,74,74,0.7)", fontFamily:"Inter,sans-serif", fontSize:".78rem", cursor:"pointer" }}>✕ Reject</button>
                   </div>
                 </div>
               ))
@@ -862,9 +878,8 @@ const AdminPanel = ({ onClose, onApprove }) => {
       </div>
     </ModalWrap>
   );
-};
 
-// ── FOOTER ────────────────────────────────────────────────────────────────────
+};// ── FOOTER ────────────────────────────────────────────────────────────────────
 const Footer = () => (
   <footer style={{ borderTop:"1px solid rgba(201,164,80,0.2)", padding:"3.5rem 2rem", textAlign:"center", position:"relative", zIndex:1 }}>
     <div style={{ fontFamily:"Cinzel,serif", fontSize:"1.6rem", fontWeight:700, background:"linear-gradient(135deg,#C9A450,#E8C97A)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", backgroundClip:"text", marginBottom:".5rem" }}>ACTS 29</div>
@@ -886,22 +901,18 @@ export default function App() {
   // then merge in any members that have been approved via the Admin Panel.
   // Approved members are saved to localStorage so they persist permanently —
   // across page refreshes and future visits.
-  const [members, setMembers] = useState(() => {
-    const saved = store.get("acts29_approved") || [];
-    // Merge seed + saved, avoiding duplicates by id
-    const ids = new Set(saved.map(m => m.id));
-    return [...SEED_MEMBERS.filter(m => !ids.has(m.id)), ...saved];
-  });
+ const [members, setMembers] = useState([...SEED_MEMBERS]);
+
+  useEffect(() => {
+    (async () => {
+      const snap = await getDocs(collection(db, "members"));
+      const fromDb = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setMembers([...SEED_MEMBERS, ...fromDb]);
+    })();
+  }, []);
 
   const handleApprove = (member) => {
-    const approved = { ...member, approved: true };
-    setMembers(prev => {
-      const next = [...prev, approved];
-      // Persist only the approved (non-seed) members so they survive refresh
-      const toSave = next.filter(m => m.approved && !SEED_MEMBERS.find(s => s.id === m.id));
-      store.set("acts29_approved", toSave);
-      return next;
-    });
+    setMembers(prev => [...prev, member]);
   };
 
   return (
